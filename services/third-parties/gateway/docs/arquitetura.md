@@ -45,12 +45,11 @@ Todos os papéis usam a mesma imagem, com entrypoint `node dist/main.js <papel>`
 
 ### Infraestrutura e rede
 
-A infraestrutura vem do Floci do gateway ([ADR 0012](../../../../docs/adr/0012-servicos-aws-por-organizacao.md)):
+A infraestrutura vem do Floci do gateway ([ADR 0012](../../../../docs/adr/0012-servicos-aws-por-organizacao.md)), com uma exceção: o Redis do gateway (`gateway-redis`) é um container próprio, sem persistência, usado para rate limit e cache de autenticação ([ADR 0014](../../../../docs/adr/0014-kafka-e-redis-em-containers-proprios.md)).
 
 | Serviço AWS | Uso no gateway |
 | --- | --- |
 | RDS PostgreSQL 18 | Banco de dados principal, com PgBouncer na frente |
-| ElastiCache | Rate limit e cache de autenticação |
 | EventBridge | Barramento `gateway-domain`, que roteia os eventos de domínio para as filas |
 | SQS, com DLQ | Filas dos papéis `worker` e `simulator` |
 | DynamoDB | Log público de eventos (seção 7.4) |
@@ -97,7 +96,7 @@ Um módulo nunca importa o domínio, a infraestrutura ou as tabelas de outro.
  http / jobs ──▶ application ──▶ domain
       │               ▲
       ▼               │ implementa as portas
-  factories ──▶ infra (Drizzle, ElastiCache, SQS, EventBridge, DynamoDB, S3, KMS, AppConfig, cliente do banco)
+  factories ──▶ infra (Drizzle, Redis, SQS, EventBridge, DynamoDB, S3, KMS, AppConfig, cliente do banco)
 ```
 
 | Camada | Conteúdo | Pode importar |
@@ -315,7 +314,7 @@ sequenceDiagram
     participant DB as Postgres
 
     C->>A: POST /v1/charges com Idempotency-Key
-    A->>A: autentica (cache) e aplica o rate limit (ElastiCache)
+    A->>A: autentica (cache) e aplica o rate limit (Redis)
     A->>I: reivindica a chave
     alt chave já concluída
         I-->>A: resposta guardada
@@ -494,7 +493,7 @@ A retenção de 30 dias é técnica e por isso fica no TTL do DynamoDB, em tempo
 - **Réplica de leitura:** listagens e relatórios leem da read replica do RDS, e as escritas e a consulta por id vão ao primário (seção 5.5). O código mantém os dois pools. No laboratório, a URL da réplica aponta para o primário até que se comprove que a read replica do Floci acompanha o primário (ADR 0012).
 - **PgBouncer em modo transação:** fica na frente do RDS e reduz o número de conexões. O RDS Proxy do Floci não faz pooling, por isso não o substitui. No modo transação não há estado de sessão, então o lock consultivo de eleição do `scheduler` usa uma conexão direta ao RDS, sem passar pelo PgBouncer.
 - **Idempotência no Postgres:** a chave guardada na cobrança garante que nunca haja duplicidade. A tabela `idempotency_keys` guarda a resposta para replay.
-- **Rate limit no ElastiCache:** token bucket com script Lua atômico, em tempo real (RNF-05).
+- **Rate limit no Redis do gateway:** token bucket com script Lua atômico, em tempo real (RNF-05). Como o `gateway-redis` não tem persistência, os contadores recomeçam a cada restart, o que é aceitável.
 - **Filas SQS por finalidade:** `webhook-events`, `webhook-delivery`, `reports`, `payouts` e `simulation`, cada uma com DLQ e concorrência própria de consumo. As regras do EventBridge fazem o fan-out dos eventos de domínio. As mensagens que esgotam as tentativas vão para a DLQ e geram alerta.
 - **Sem pontos de contenção:** nenhuma linha de saldo é atualizada por cobrança. O saldo é calculado por agregação no fechamento do repasse, com índice em `(account_id, available_on)`. Se o volume diário tornar essa agregação lenta, um job pode materializar o saldo por dia numa tabela própria.
 - **Relatórios em streaming:** o worker lê da réplica com cursor, gera o CSV aos poucos e envia ao S3 em upload multipart. O arquivo nunca fica inteiro em memória.
@@ -544,9 +543,9 @@ Entra na fatia vertical:
 - **Plataforma:** autenticação, idempotência, rate limit, outbox, `scheduled_jobs` e mapeamento de erros.
 - **Papéis:** `api`, `relay`, `worker` e `scheduler`. O `scheduler` já é necessário na fase 1 para expirar autorizações (RN-07) e agendar as entregas de webhook.
 - **Tabelas no RDS:** `accounts`, `api_keys`, `charges`, `webhook_endpoints`, `webhook_deliveries`, `domain_events`, `scheduled_jobs` e `idempotency_keys`.
+- **Redis:** o container `gateway-redis`.
 - **Recursos AWS:**
   - RDS;
-  - ElastiCache;
   - barramento `gateway-domain` no EventBridge;
   - filas SQS `webhook-events` e `webhook-delivery`, com DLQ;
   - tabela `gateway-events` no DynamoDB;

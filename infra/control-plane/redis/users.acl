@@ -1,0 +1,3 @@
+user default off
+user control on >control-dev ~* &* +@all
+user gateway on >gateway-dev resetkeys %R~sim:now ~sim:watermark:gateway ~sim:config-version:gateway resetchannels &sim:clock:* -@all +@connection +info +get +set +subscribe +unsubscribe

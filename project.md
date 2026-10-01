@@ -89,8 +89,8 @@ Contém o relógio simulado e o orquestrador de cenários de caos. Funciona como
 
 | Rede | Participantes |
 | --- | --- |
-| `internal` | Serviços da empresa, Floci da empresa e tudo o que ele cria (RDS, ElastiCache, MSK, Lambdas), proxy de borda da empresa, OTel Collector da empresa |
-| `third-party-<nome>` | Serviços do terceiro, Floci do terceiro e tudo o que ele cria, proxy de borda do terceiro |
+| `internal` | Serviços da empresa, Floci da empresa e tudo o que ele cria (RDS, Lambdas), Kafka e Redis da empresa, proxy de borda da empresa, OTel Collector da empresa |
+| `third-party-<nome>` | Serviços do terceiro, Floci do terceiro e tudo o que ele cria, Redis do terceiro (quando houver), proxy de borda do terceiro |
 | `internet` | Proxies de borda das organizações; loja e integrações; o papel `worker` do gateway; o emissor de notas |
 | `sim-control` | Comunicação interna do plano de controle: Redis do relógio, orquestrador, collector e Grafana do modo deus |
 
@@ -135,9 +135,9 @@ Eventos publicados: `store.order-created`, `store.order-cancelled`, `store.order
   4. envia uma mensagem para a fila SQS de ingestão;
   5. responde rapidamente.
 - **Ingerir o relatório de liquidação** com uma state machine do Step Functions: solicitar o relatório, consultar o status, baixar o CSV pela URL pré-assinada, gravar o bruto e enfileirar o processamento. A execução é iniciada pelo agendador em tempo simulado. As esperas da state machine são só intervalos técnicos de polling.
-- **Executar jobs agendados** com o BullMQ, sobre o ElastiCache: fazer polling de notas pendentes e buscar arquivos novos no SFTP do banco.
+- **Executar jobs agendados** com o BullMQ, sobre o Redis da empresa: fazer polling de notas pendentes e buscar arquivos novos no SFTP do banco.
 - **Gravar todo dado externo cru** no bucket `landing` do S3 antes de qualquer processamento. O bucket tem Object Lock, que torna os objetos imutáveis.
-- **Traduzir os dados externos** para eventos internos, no vocabulário da empresa, e publicá-los no Kafka (MSK) via outbox.
+- **Traduzir os dados externos** para eventos internos, no vocabulário da empresa, e publicá-los no Kafka via outbox.
 
 Os serviços AWS de cada organização estão na [ADR 0012](docs/adr/0012-servicos-aws-por-organizacao.md).
 
@@ -397,11 +397,11 @@ O tempo simulado vale para tudo que é negócio. Timeouts HTTP, rate limit, rete
 
 | Componente | Uso |
 | --- | --- |
-| Floci | Emulação da conta AWS de cada organização: uma instância para a empresa e uma para cada terceiro. Os bancos de dados, caches e brokers abaixo são criados por ele |
+| Floci | Emulação da conta AWS de cada organização: uma instância para a empresa e uma para cada terceiro. Cria o RDS e o Amazon MQ |
 | RDS PostgreSQL 18 | Um banco por serviço, criado pelo Floci da organização |
 | PgBouncer | Pooling de conexões na frente do RDS, porque o RDS Proxy do Floci não faz pooling |
-| ElastiCache | Redis da empresa (BullMQ, idempotência, rate limit) e do gateway (rate limit, cache de autenticação) |
-| MSK | Kafka interno da empresa (Redpanda), com schema registry |
+| Kafka (Redpanda) | Kafka interno da empresa, com schema registry. Container próprio, com versão fixa e volume durável ([ADR 0014](docs/adr/0014-kafka-e-redis-em-containers-proprios.md)) |
+| Redis | Containers próprios: o da empresa (BullMQ, idempotência, rate limit), com AOF, e o do gateway (rate limit, cache de autenticação), sem persistência ([ADR 0014](docs/adr/0014-kafka-e-redis-em-containers-proprios.md)) |
 | Amazon MQ | RabbitMQ da fila da "prefeitura" no emissor de notas |
 | Redis do relógio | Container comum do plano de controle, fora de qualquer conta AWS |
 | Proxies de borda (nginx) | Um por organização. Expõem na rede `internet` só os endpoints públicos |
@@ -417,7 +417,7 @@ Cada organização usa a própria instância ([ADR 0005](docs/adr/0005-floci-por
 
 | Serviço AWS | Uso |
 | --- | --- |
-| RDS, ElastiCache, MSK | Bancos de dados da loja, das integrações e do conciliador; Redis; Kafka |
+| RDS | Bancos de dados da loja, das integrações e do conciliador |
 | S3 | Bucket `landing` com Object Lock, para dados brutos de terceiros; bucket `reports` para relatórios do conciliador |
 | API Gateway e Lambda | Recepção dos webhooks dos terceiros |
 | DynamoDB | Deduplicação dos webhooks recebidos |
@@ -432,7 +432,7 @@ Cada organização usa a própria instância ([ADR 0005](docs/adr/0005-floci-por
 
 | Organização | Uso |
 | --- | --- |
-| Gateway | RDS, ElastiCache, EventBridge e SQS (eventos e filas dos workers), DynamoDB (log público de eventos), S3 (relatórios de liquidação, entregues por URL pré-assinada), KMS (cifragem dos segredos de webhook), Secrets Manager, AppConfig (caos e comportamento do pagador) |
+| Gateway | RDS, EventBridge e SQS (eventos e filas dos workers), DynamoDB (log público de eventos), S3 (relatórios de liquidação, entregues por URL pré-assinada), KMS (cifragem dos segredos de webhook), Secrets Manager, AppConfig (caos e comportamento do pagador) |
 | Banco | RDS, Secrets Manager, AppConfig (caos) |
 | Emissor de notas | RDS, Amazon MQ, S3 (XML das notas), Secrets Manager, AppConfig (caos) |
 
@@ -442,7 +442,7 @@ As URLs pré-assinadas do gateway são assinadas com o host `gateway-s3`, que o 
 
 ### 9.3 Kafka
 
-O broker é o MSK do Floci da empresa. Tópicos internos, todos com schema registrado em `contracts/`:
+O broker é o Redpanda da empresa (`company-kafka`), em container próprio. Tópicos internos, todos com schema registrado em `contracts/`:
 
 | Tópico | Produtor | Consumidores |
 | --- | --- | --- |

@@ -1,0 +1,35 @@
+# Plano de controle da simulação (seção 3.3 do project.md e ADR 0011).
+# Por enquanto só o Redis do relógio. O orquestrador e o collector do modo deus
+# entram depois.
+
+services:
+  sim-clock-redis:
+    image: redis:8.8.3-alpine
+    # Usuários e permissões em control-plane/redis/users.acl. Sem persistência:
+    # o instante inicial é recriado pelo sim-clock-init.
+    command: ["redis-server", "--aclfile", "/etc/redis/users.acl", "--save", "", "--appendonly", "no"]
+    volumes:
+      - ../control-plane/redis/users.acl:/etc/redis/users.acl:ro
+    networks:
+      - sim-control
+      # O plano de controle se conecta à rede privada de cada organização.
+      - internal
+      - third-party-gateway
+    ports:
+      - "127.0.0.1:6300:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--user", "control", "--pass", "control-dev", "--no-auth-warning", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # Define o instante simulado inicial (ISO 8601, UTC) apenas se ele ainda não
+  # existir. Será substituído pelo serviço do relógio (sim-control/clock).
+  sim-clock-init:
+    image: redis:8.8.3-alpine
+    command: ["redis-cli", "-h", "sim-clock-redis", "--user", "control", "--pass", "control-dev", "--no-auth-warning", "SET", "sim:now", "2026-01-01T00:00:00Z", "NX"]
+    networks: [sim-control]
+    depends_on:
+      sim-clock-redis:
+        condition: service_healthy
+    restart: "no"

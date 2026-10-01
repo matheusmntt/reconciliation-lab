@@ -1,7 +1,8 @@
 # ADR 0012: Serviços AWS por organização
 
-- **Status:** Aceita
+- **Status:** Aceita, substituída parcialmente
 - **Data:** 2026-10-01
+- **Substituída parcialmente por:** [ADR 0014](0014-kafka-e-redis-em-containers-proprios.md). O ElastiCache e o MSK saem do projeto: Kafka e Redis rodam em containers próprios, e o executor da empresa passa a ser o BullMQ sobre o `company-redis`. O restante desta ADR continua valendo.
 - **Substitui parcialmente:** [ADR 0005](0005-floci-por-organizacao.md) (uso de cada instância do Floci)
 - **Complementa:** [ADR 0007](0007-agendamento-em-tempo-simulado.md) (executor de filas por serviço)
 

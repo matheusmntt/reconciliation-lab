@@ -1,0 +1,36 @@
+# Ambiente local do Reconciliation Lab.
+# As redes são declaradas só aqui (ADR 0011). O plano de controle e cada
+# organização têm o próprio arquivo em compose/.
+#
+# Portas publicadas no host, sempre em 127.0.0.1 e só para ferramentas de depuração.
+# O RDS usa a mesma porta dentro e fora do Floci, numa faixa por organização
+# (empresa 70xx, gateway 71xx, banco 72xx, emissor 73xx):
+#   6300         Redis do relógio
+#   6301         Redis da empresa
+#   19092        Kafka da empresa
+#   18081        schema registry da empresa
+#   4567         API do Floci do gateway
+#   7101-7102    RDS do gateway
+#   6401         Redis do gateway
+#   8080         proxy de borda do gateway
+
+name: reconciliation-lab
+
+include:
+  - compose/control-plane.yml
+  - compose/company.yml
+  - compose/gateway.yml
+
+networks:
+  # Rede "pública" entre organizações: proxies de borda e quem chama outras organizações.
+  internet:
+    name: internet
+  # Comunicação interna do plano de controle.
+  sim-control:
+    name: sim-control
+  # Redes privadas das organizações. Os nomes são fixos porque o Floci de cada
+  # organização coloca nelas os containers que cria.
+  internal:
+    name: internal
+  third-party-gateway:
+    name: third-party-gateway

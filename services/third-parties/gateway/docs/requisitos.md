@@ -44,7 +44,7 @@ Estas rotas não exigem autenticação.
 | GET | `/openapi.json` | Especificação OpenAPI gerada dos schemas Zod | 1 |
 | GET | `/docs` | Documentação navegável da API | 1 |
 | GET | `/health/live` | O processo está de pé | 1 |
-| GET | `/health/ready` | RDS, ElastiCache e os serviços AWS usados pelo papel estão acessíveis | 1 |
+| GET | `/health/ready` | RDS, Redis e os serviços AWS usados pelo papel estão acessíveis | 1 |
 
 ### 1.3 Webhooks emitidos
 
@@ -211,7 +211,7 @@ Os valores numéricos são exemplos configuráveis por conta.
   - códigos 400, 401, 404, 409, 422, 429 e 5xx com significado fixo;
   - dentro da v1, só mudanças aditivas.
 - **RNF-03, isolamento** ([ADR 0011](../../../../docs/adr/0011-topologia-de-rede.md)):
-  - o Floci do gateway e tudo o que ele cria (RDS, ElastiCache) ficam apenas na rede `third-party-gateway`;
+  - o Floci do gateway, o RDS que ele cria e o `gateway-redis` ficam apenas na rede `third-party-gateway`;
   - a API e os downloads dos relatórios chegam à rede `internet` só pelo proxy de borda, como `gateway-api` e `gateway-s3`;
   - só o papel `worker` entra na rede `internet`, para chamar os webhooks da empresa e a API interbancária do banco;
   - o relógio, o orquestrador e o collector do modo deus alcançam o gateway pela rede `third-party-gateway`.
@@ -252,14 +252,20 @@ Os valores numéricos são exemplos configuráveis por conta.
 - **DI-01, simulação do pagador por worker interno:** o comportamento de quem paga (Pix, boleto) e de quem contesta (chargeback) é simulado dentro do gateway, porque faz parte do mundo que ele enxerga. O worker não expõe nenhuma rota. Ele é configurado pela seção `behavior` da configuração no AppConfig, recebe os eventos pela fila SQS `simulation` e agenda suas ações na tabela `scheduled_jobs`.
 - **DI-02, vocabulário próprio:** estados e eventos usam a linguagem do gateway (`paid`, `charge.paid`), diferente da empresa, para que a camada anticorrupção tenha uma tradução de verdade a fazer.
 
-## 6. Verificações pendentes
+## 6. Verificações
 
-- **URLs pré-assinadas com IAM ligado:** confirmar que funcionam com a imposição de IAM ligada no Floci ([floci-io/floci#4367](https://github.com/floci-io/floci/issues/4367)) e passando pelo proxy de borda com o host `gateway-s3`.
-- **Read replica do RDS:** confirmar se ela continua acompanhando o primário. Enquanto isso não for confirmado, a URL da réplica aponta para o primário.
-- **EventBridge para SQS:** confirmar o roteamento por `detail-type` e o envio para a DLQ depois de esgotadas as tentativas.
-- **Temporal na imagem Docker:** confirmar que a imagem usada pelo gateway foi compilada com Temporal (`node -p "typeof Temporal"` deve imprimir `object`).
+Estas verificações foram feitas no [spike 0001](../../../../docs/spikes/0001-floci.md), com o Floci 2.1.0.
 
-Essas verificações fazem parte do spike da fase 0 ([ADR 0012](../../../../docs/adr/0012-servicos-aws-por-organizacao.md)).
+- **URLs pré-assinadas com IAM ligado:** funcionam pelo proxy de borda com o host `gateway-s3`. A issue [floci-io/floci#4367](https://github.com/floci-io/floci/issues/4367) não se reproduziu. O Floci respeita a expiração e as políticas IAM, mas não confere a assinatura. Por isso, a proteção dos relatórios vem do proxy de borda, que só aceita `GET` assinado no bucket, da expiração e da política do usuário que assina.
+- **Read replica do RDS:** não é suportada pelo Floci 2.1.0. A URL da réplica aponta para o primário.
+- **EventBridge para SQS:** o roteamento por `detail-type`, exato e por prefixo, funciona, e a mensagem vai para a DLQ depois de esgotadas as tentativas.
+- **Temporal na imagem Docker:** presente em `node:26.10.0-slim`. A build da imagem falha se ele não existir.
+
+Um comportamento do Floci afeta o código do gateway:
+
+- **AppConfig:** a API de dados só aceita ids. A `libs/chaos` resolve os nomes para ids pela API de controle.
+
+O ElastiCache, que não sobrevivia a um restart do Floci, foi trocado por um Redis em container próprio ([ADR 0014](../../../../docs/adr/0014-kafka-e-redis-em-containers-proprios.md)). Como esse Redis não tem persistência, o gateway precisa tolerar a perda do rate limit e do cache de autenticação a cada restart dele.
 
 ## 7. Fora de escopo
 
