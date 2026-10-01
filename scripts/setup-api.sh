@@ -4,6 +4,7 @@ set -euo pipefail
 # Uso: scripts/setup-api.sh <diretório-do-serviço>
 TARGET_DIR="${1:?uso: $0 <diretório-do-serviço>}"
 PROJECT_NAME="$(basename "$TARGET_DIR")"
+PNPM_VERSION="$(pnpm --version)"
 
 mkdir -p "$TARGET_DIR/src"
 cd "$TARGET_DIR"
@@ -15,12 +16,13 @@ cat > package.json << EOF
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@$PNPM_VERSION",
   "engines": {
-    "node": ">=20"
+    "node": ">=26"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format esm --clean",
+    "build": "tsup src/server.ts --format esm --target node26 --clean",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
@@ -30,17 +32,27 @@ cat > package.json << EOF
 }
 EOF
 
+echo "📝 Criando pnpm-workspace.yaml..."
+cat > pnpm-workspace.yaml << 'EOF'
+# Configurações do pnpm deste serviço. Não declara pacotes, então não é um
+# workspace entre serviços (ver ADR 0004).
+
+# Dependências autorizadas a rodar scripts de instalação.
+allowBuilds:
+  esbuild: true
+EOF
+
 echo "📥 Instalando dependências..."
-npm install fastify zod fastify-type-provider-zod
-npm install -D typescript tsup tsx @types/node
-npm install -D -E @biomejs/biome
+pnpm add fastify zod fastify-type-provider-zod
+pnpm add -D typescript tsup tsx @types/node@26
+pnpm add -D -E @biomejs/biome
 
 echo "📝 Criando tsconfig.json..."
 cat > tsconfig.json << 'EOF'
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022"],
+    "target": "ES2025",
+    "lib": ["ES2025", "ESNext.Temporal"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "types": ["node"],
@@ -73,7 +85,7 @@ cat > biome.json << EOF
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "preset": "recommended"
     }
   },
   "javascript": {
@@ -132,8 +144,8 @@ app.listen({ port, host: '0.0.0.0' }).then(() => {
 EOF
 
 echo "🧹 Aplicando Biome..."
-npx biome check --write . > /dev/null
+pnpm exec biome check --write . > /dev/null
 
 echo ""
 echo "✅ Pronto! Para começar:"
-echo "   cd $TARGET_DIR && npm run dev"
+echo "   cd $TARGET_DIR && pnpm dev"

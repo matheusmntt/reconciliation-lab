@@ -55,11 +55,19 @@ flowchart LR
 
 ## Requisitos
 
-- Node 22 (versão fixada em [`.nvmrc`](.nvmrc))
-- GNU Make 3.81 ou superior
-- Docker com Compose, quando a infraestrutura entrar
+- Node 26, versão fixada em [`.nvmrc`](.nvmrc). Use o binário oficial, por exemplo via nvm: algumas builds, como a do Homebrew, vêm sem a API Temporal ([ADR 0003](docs/adr/0003-node-26.md)).
+- pnpm, na versão declarada no campo `packageManager` de cada serviço ([ADR 0004](docs/adr/0004-pnpm.md)).
+- GNU Make 3.81 ou superior.
+- Docker com Compose, quando a infraestrutura entrar.
 
 Go, PHP e Python passam a ser necessários nas fases em que seus serviços entram.
+
+Para conferir se o Node ativo tem Temporal:
+
+```bash
+nvm use
+node -p "typeof Temporal"   # deve imprimir "object"
+```
 
 ## Como usar
 
