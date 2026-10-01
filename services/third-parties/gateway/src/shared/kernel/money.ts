@@ -1,6 +1,8 @@
 // Dinheiro em centavos inteiros (project.md, seção 12). No domínio o valor é um
 // `number` inteiro seguro; o `bigint` fica só no banco de dados.
 
+import { BusinessRuleViolation } from './domain-error'
+
 export type Currency = 'BRL'
 
 const SUPPORTED_CURRENCIES: readonly string[] = ['BRL']
@@ -16,14 +18,11 @@ export type MoneyErrorCode =
   | 'invalid_rate'
   | 'invalid_installments'
 
-// Quando o DomainError existir (F1.02), este erro passa a estender ele.
-export class InvalidMoney extends Error {
-  constructor(
-    readonly code: MoneyErrorCode,
-    message: string,
-  ) {
-    super(message)
-    this.name = 'InvalidMoney'
+export class InvalidMoney extends BusinessRuleViolation {
+  declare readonly code: MoneyErrorCode
+
+  constructor(code: MoneyErrorCode, message: string) {
+    super(code, message)
   }
 }
 

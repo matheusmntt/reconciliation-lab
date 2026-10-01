@@ -1,5 +1,6 @@
 import { fc, test } from '@fast-check/vitest'
 import { describe, expect, it } from 'vitest'
+import { BusinessRuleViolation } from './domain-error'
 import { InvalidMoney, Money } from './money'
 
 // Centavos que cabem com folga em qualquer operação deste arquivo.
@@ -37,6 +38,13 @@ describe('Money.of', () => {
 
   it('recusa moedas diferentes de BRL (RN-01)', () => {
     expectInvalid(() => Money.of(100, 'USD'), 'currency_not_supported')
+  })
+
+  it('InvalidMoney é uma violação de regra de negócio (HTTP 422)', () => {
+    const error = new InvalidMoney('currency_not_supported', 'm')
+    expect(error).toBeInstanceOf(BusinessRuleViolation)
+    expect(error.type).toBe('business_rule')
+    expect(error.name).toBe('InvalidMoney')
   })
 })
 
