@@ -1,7 +1,8 @@
 # ADR 0005: Uma instância do Floci por organização
 
-- **Status:** Aceita
+- **Status:** Aceita, substituída parcialmente
 - **Data:** 2026-10-01
+- **Substituída parcialmente por:** [ADR 0011](0011-topologia-de-rede.md), nas redes em que cada Floci fica, e [ADR 0012](0012-servicos-aws-por-organizacao.md), nos serviços usados em cada instância. A decisão de ter uma instância por organização continua valendo.
 
 ## Contexto
 

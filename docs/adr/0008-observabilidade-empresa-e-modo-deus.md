@@ -1,7 +1,8 @@
 # ADR 0008: Observabilidade da empresa e modo deus
 
-- **Status:** Aceita
+- **Status:** Aceita, substituída parcialmente
 - **Data:** 2026-10-01
+- **Substituída parcialmente por:** [ADR 0011](0011-topologia-de-rede.md). O collector do modo deus passa a se conectar à rede privada de cada organização, e os serviços deixam de entrar na rede `sim-control`. O restante desta ADR continua valendo.
 
 ## Contexto
 

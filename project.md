@@ -83,18 +83,23 @@ Contém o gateway, o banco e o emissor de notas, cada um com seu próprio banco 
 
 ### 3.3 Plano de controle da simulação
 
-Contém o relógio simulado e o orquestrador de cenários de caos. Funciona como "as leis da física" da simulação: todos os serviços o consultam, mas ele nunca é usado para trocar dados de negócio. Fica numa rede própria, com um Redis dedicado.
+Contém o relógio simulado e o orquestrador de cenários de caos. Funciona como "as leis da física" da simulação: todos os serviços o consultam, mas ele nunca é usado para trocar dados de negócio. Seus componentes (o Redis dedicado do relógio, o orquestrador e o collector do modo deus) ficam numa rede própria e também se conectam à rede privada de cada organização ([ADR 0011](docs/adr/0011-topologia-de-rede.md)).
 
 ### 3.4 Redes Docker
 
 | Rede | Participantes |
 | --- | --- |
-| `internet` | gateway, banco, emissor de notas, loja, integrações, Floci do gateway (apenas o endpoint do S3) |
-| `internal` | loja, integrações, conciliador, Kafka, Postgres da empresa, Redis da empresa, Floci da empresa, OTel Collector da empresa |
-| `sim-control` | todos os serviços, Redis do relógio, orquestrador de cenários, Floci de cada organização, OTel Collector do modo deus |
-| `third-party-<nome>` | cada terceiro e sua infraestrutura própria: Postgres, Redis (quando houver) e Floci |
+| `internal` | Serviços da empresa, Floci da empresa e tudo o que ele cria (RDS, ElastiCache, MSK, Lambdas), proxy de borda da empresa, OTel Collector da empresa |
+| `third-party-<nome>` | Serviços do terceiro, Floci do terceiro e tudo o que ele cria, proxy de borda do terceiro |
+| `internet` | Proxies de borda das organizações; loja e integrações; o papel `worker` do gateway; o emissor de notas |
+| `sim-control` | Comunicação interna do plano de controle: Redis do relógio, orquestrador, collector e Grafana do modo deus |
 
-Cada organização tem sua própria instância do Floci, que representa a conta AWS dela ([ADR 0005](docs/adr/0005-floci-por-organizacao.md)). O Floci do gateway entra na rede `internet` só para que as integrações baixem os relatórios de liquidação por URL pré-assinada. Todas as instâncias entram na rede `sim-control` para que o orquestrador grave a configuração de cada cenário.
+A topologia segue a [ADR 0011](docs/adr/0011-topologia-de-rede.md):
+
+- **Floci só na rede privada:** cada organização tem sua própria instância do Floci, que representa a conta AWS dela ([ADR 0005](docs/adr/0005-floci-por-organizacao.md)). Ela fica apenas na rede privada da organização, junto com tudo o que cria.
+- **Entrada pela borda:** tráfego vindo de outra organização entra sempre pelo proxy de borda, que expõe só os endpoints públicos (`company-webhooks`, `gateway-api`, `gateway-s3`, `bank-api`, `bank-sftp` e `invoicing-api`).
+- **Saída restrita:** na rede `internet` entram apenas os serviços que chamam outras organizações.
+- **Plano de controle:** o Redis do relógio, o orquestrador e o collector do modo deus se conectam à rede privada de cada organização.
 
 ---
 
@@ -105,9 +110,9 @@ Cada organização tem sua própria instância do Floci, que representa a conta 
 | Loja | Empresa | Laravel, PostgreSQL | O que **deveria** acontecer |
 | Integrações | Empresa | Node, Fastify, Drizzle, BullMQ | Traduz o mundo externo para eventos internos |
 | Conciliador | Empresa | Node, Fastify, Drizzle, BullMQ | Casa registros e classifica divergências |
-| Gateway de pagamento | Terceiro | Node, Fastify, Drizzle, BullMQ | O que **foi cobrado** e o que **será repassado** |
+| Gateway de pagamento | Terceiro | Node, Fastify, Drizzle, EventBridge, SQS | O que **foi cobrado** e o que **será repassado** |
 | Banco | Terceiro | Go, net/http, pgx, sqlc | O dinheiro que **realmente entrou** |
-| Emissor de notas | Terceiro | Python, FastAPI, SQLAlchemy, Pydantic | O que **foi declarado** ao fisco |
+| Emissor de notas | Terceiro | Python, FastAPI, SQLAlchemy, Pydantic, RabbitMQ | O que **foi declarado** ao fisco |
 
 A distribuição segue uma regra simples: o domínio mais crítico fica na linguagem de maior domínio (Node) e o domínio mais simples fica na linguagem em aprendizado (Go).
 
@@ -123,10 +128,18 @@ Eventos publicados: `store.order-created`, `store.order-cancelled`, `store.order
 
 É a camada anticorrupção e o único lugar da empresa que conhece os formatos dos terceiros. Responsabilidades:
 
-- Receber webhooks do gateway e do emissor, validar a assinatura HMAC, garantir idempotência, gravar o payload bruto e responder rapidamente.
-- Executar jobs agendados (BullMQ): solicitar e baixar relatórios de liquidação do gateway, fazer polling de notas pendentes, buscar arquivos novos no SFTP do banco.
-- Gravar todo dado externo cru no bucket de landing do S3 antes de qualquer processamento.
-- Traduzir dados externos para eventos internos no vocabulário da empresa e publicá-los no Kafka via outbox.
+- **Receber webhooks** do gateway e do emissor por um endpoint do API Gateway, exposto pelo proxy de borda como `company-webhooks`. Uma Lambda, em imagem de container com Node 26, recebe cada webhook e:
+  1. valida a assinatura HMAC;
+  2. garante a idempotência com uma escrita condicional no DynamoDB;
+  3. grava o payload bruto no S3;
+  4. envia uma mensagem para a fila SQS de ingestão;
+  5. responde rapidamente.
+- **Ingerir o relatório de liquidação** com uma state machine do Step Functions: solicitar o relatório, consultar o status, baixar o CSV pela URL pré-assinada, gravar o bruto e enfileirar o processamento. A execução é iniciada pelo agendador em tempo simulado. As esperas da state machine são só intervalos técnicos de polling.
+- **Executar jobs agendados** com o BullMQ, sobre o ElastiCache: fazer polling de notas pendentes e buscar arquivos novos no SFTP do banco.
+- **Gravar todo dado externo cru** no bucket `landing` do S3 antes de qualquer processamento. O bucket tem Object Lock, que torna os objetos imutáveis.
+- **Traduzir os dados externos** para eventos internos, no vocabulário da empresa, e publicá-los no Kafka (MSK) via outbox.
+
+Os serviços AWS de cada organização estão na [ADR 0012](docs/adr/0012-servicos-aws-por-organizacao.md).
 
 Eventos publicados: `payments.charge-authorized`, `payments.charge-captured`, `payments.charge-failed`, `payments.charge-refunded`, `payments.chargeback-opened`, `payments.settlement-line-received`, `finance.statement-line-received`, `fiscal.invoice-requested`, `fiscal.invoice-authorized`, `fiscal.invoice-rejected`, `fiscal.invoice-cancelled`.
 
@@ -317,13 +330,14 @@ A conciliação é idempotente: reprocessar um período a partir do bruto no S3 
 
 ## 7. Caos
 
-Cada serviço lê sua configuração de caos do SSM Parameter Store do Floci da própria organização, sob o prefixo `/sim/<serviço>/` ([ADR 0006](docs/adr/0006-configuracao-e-decisoes-de-caos.md)). O mesmo prefixo guarda os parâmetros do comportamento simulado do mundo, como o pagador dentro do gateway.
+Cada serviço lê sua configuração de caos do AppConfig do Floci da própria organização ([ADR 0006](docs/adr/0006-configuracao-e-decisoes-de-caos.md) e [ADR 0013](docs/adr/0013-appconfig-para-configuracao-de-caos.md)). A configuração é um único documento JSON por serviço, com a seed, as probabilidades de caos e os parâmetros do comportamento simulado do mundo, como o pagador dentro do gateway.
 
-- **Configuração por cenário:** antes de cada cenário, o orquestrador grava a seed (`/sim/seed`) e os parâmetros no SSM de todas as organizações.
-- **Sem redeploy:** alterar um parâmetro muda o comportamento sem redeploy. Os serviços recarregam a configuração quando a versão do parâmetro muda.
+- **Configuração por cenário:** antes de cada cenário, o orquestrador cria uma nova versão do documento de cada serviço e a aplica com um deployment. Cada cenário vira uma única versão atômica por serviço.
+- **Confirmação:** cada serviço publica a versão aplicada em `sim:config-version:<serviço>`, e o orquestrador só inicia o cenário quando todos estão na versão esperada.
+- **Sem redeploy:** os serviços consultam o AppConfig periodicamente e aplicam as novas versões sem reiniciar.
 - **Decisões determinísticas:** toda decisão de caos é calculada a partir da seed, de uma chave estável e do nome da decisão, nunca com `Math.random()`.
 - **Registro:** toda falha injetada emite um evento de telemetria `chaos.injected`, visível apenas no painel "modo deus".
-- **Acesso do conciliador:** uma política IAM no Floci da empresa impede o conciliador de ler `/sim/*`.
+- **Acesso do conciliador:** uma política IAM no Floci da empresa impede o conciliador de ler a configuração de simulação no AppConfig.
 
 ### 7.1 Catálogo de falhas
 
@@ -367,7 +381,7 @@ Todos os serviços, de todos os planos, obtêm o "agora" de uma biblioteca que l
 
 Há uma biblioteca cliente por linguagem em `libs/sim-clock/` (TypeScript, PHP, Python e Go). Todos os horários são armazenados em UTC; conversões para `America/Sao_Paulo` acontecem apenas nas bordas onde o negócio exige (data de competência da nota, data do extrato).
 
-Tarefas futuras, como expirações, liquidações, renovações e retentativas de webhook, não usam os jobs atrasados do BullMQ, que correm em tempo real. Cada serviço guarda essas tarefas numa tabela `scheduled_jobs`, com `run_at` em tempo simulado, e um agendador executa o que venceu sempre que o relógio avança ([ADR 0007](docs/adr/0007-agendamento-em-tempo-simulado.md)):
+Tarefas futuras, como expirações, liquidações, renovações e retentativas de webhook, não usam os atrasos nativos das filas (BullMQ, SQS ou RabbitMQ), que correm em tempo real. Cada serviço guarda essas tarefas numa tabela `scheduled_jobs`, com `run_at` em tempo simulado, e um agendador executa o que venceu sempre que o relógio avança ([ADR 0007](docs/adr/0007-agendamento-em-tempo-simulado.md)):
 
 - **Tempo do job:** o "agora" de um job é o seu `run_at`, e não o instante atual do relógio. Um pagamento agendado para o dia 3 e processado depois de um salto até o dia 30 é registrado no dia 3.
 - **Ordem com barreira:** os jobs rodam em ordem de `run_at`. Um instante só começa depois que o anterior termina, e jobs criados durante o processamento entram na mesma passada.
@@ -383,42 +397,52 @@ O tempo simulado vale para tudo que é negócio. Timeouts HTTP, rate limit, rete
 
 | Componente | Uso |
 | --- | --- |
-| PostgreSQL | Um banco por serviço; os terceiros têm instâncias isoladas em suas próprias redes |
-| Redis | BullMQ, chaves de idempotência e rate limit da empresa; instâncias próprias dos terceiros que precisarem; instância separada para o relógio simulado |
-| Kafka | Eventos internos da empresa, com schema registry |
-| Floci | Emulação da conta AWS de cada organização: uma instância para a empresa e uma para cada terceiro |
+| Floci | Emulação da conta AWS de cada organização: uma instância para a empresa e uma para cada terceiro. Os bancos de dados, caches e brokers abaixo são criados por ele |
+| RDS PostgreSQL 18 | Um banco por serviço, criado pelo Floci da organização |
+| PgBouncer | Pooling de conexões na frente do RDS, porque o RDS Proxy do Floci não faz pooling |
+| ElastiCache | Redis da empresa (BullMQ, idempotência, rate limit) e do gateway (rate limit, cache de autenticação) |
+| MSK | Kafka interno da empresa (Redpanda), com schema registry |
+| Amazon MQ | RabbitMQ da fila da "prefeitura" no emissor de notas |
+| Redis do relógio | Container comum do plano de controle, fora de qualquer conta AWS |
+| Proxies de borda (nginx) | Um por organização. Expõem na rede `internet` só os endpoints públicos |
 | SFTP (`atmoz/sftp`) | Entrega de arquivos de extrato pelo banco |
-| OpenTelemetry Collector | Dois collectors: o da empresa, na rede `internal`, e o do modo deus, na rede `sim-control` |
+| OpenTelemetry Collector | Dois collectors: o da empresa, na rede `internal`, e o do modo deus, no plano de controle |
 | Grafana, Tempo, Loki, Prometheus | Visualização de observabilidade, com uma área da empresa e uma do modo deus |
 
 ### 9.2 Uso do Floci
 
-Cada organização usa a própria instância ([ADR 0005](docs/adr/0005-floci-por-organizacao.md)). Nenhum serviço tem credenciais da conta de outra organização.
+Cada organização usa a própria instância ([ADR 0005](docs/adr/0005-floci-por-organizacao.md)). Nenhum serviço tem credenciais da conta de outra organização. A lista completa, com os motivos e os serviços que ficaram de fora, está na [ADR 0012](docs/adr/0012-servicos-aws-por-organizacao.md).
 
 #### Empresa
 
 | Serviço AWS | Uso |
 | --- | --- |
-| S3 | Bucket `landing` para dados brutos de terceiros; bucket `reports` para relatórios do conciliador |
-| SQS | Filas entre etapas de ingestão de arquivos |
+| RDS, ElastiCache, MSK | Bancos de dados da loja, das integrações e do conciliador; Redis; Kafka |
+| S3 | Bucket `landing` com Object Lock, para dados brutos de terceiros; bucket `reports` para relatórios do conciliador |
+| API Gateway e Lambda | Recepção dos webhooks dos terceiros |
+| DynamoDB | Deduplicação dos webhooks recebidos |
+| SQS | Filas entre as etapas de ingestão |
+| Step Functions | Ingestão do relatório de liquidação do gateway |
 | Secrets Manager | API keys dos terceiros e segredos de webhook |
-| SSM Parameter Store | Parâmetros de negócio em `/business/` (taxas contratadas, janelas esperadas); caos da loja e das integrações em `/sim/` |
-| IAM | Política que impede o conciliador de ler `/sim/*` |
-| CloudWatch Logs | Opcional, como destino alternativo de logs |
+| SSM Parameter Store | Parâmetros de negócio em `/business/` (taxas contratadas, janelas esperadas) |
+| AppConfig | Configuração de caos da loja e das integrações |
+| IAM | Imposição ligada, com uma política que impede o conciliador de ler a configuração de simulação |
 
 #### Terceiros
 
 | Organização | Uso |
 | --- | --- |
-| Gateway | S3 com os relatórios de liquidação, entregues por URL pré-assinada; SSM com caos e comportamento do pagador em `/sim/gateway/` |
-| Banco | SSM com caos em `/sim/bank/` |
-| Emissor de notas | SSM com caos em `/sim/invoicing/` |
+| Gateway | RDS, ElastiCache, EventBridge e SQS (eventos e filas dos workers), DynamoDB (log público de eventos), S3 (relatórios de liquidação, entregues por URL pré-assinada), KMS (cifragem dos segredos de webhook), Secrets Manager, AppConfig (caos e comportamento do pagador) |
+| Banco | RDS, Secrets Manager, AppConfig (caos) |
+| Emissor de notas | RDS, Amazon MQ, S3 (XML das notas), Secrets Manager, AppConfig (caos) |
 
-As URLs pré-assinadas do gateway são assinadas com o hostname que as integrações resolvem na rede `internet`, e expiram em tempo real, porque o Floci valida a expiração com o relógio do sistema.
+As URLs pré-assinadas do gateway são assinadas com o host `gateway-s3`, que o proxy de borda expõe na rede `internet`. Elas expiram em tempo real, porque o Floci valida a expiração com o relógio do sistema.
+
+**Timers da AWS nunca controlam o tempo de negócio.** Atrasos do SQS, o EventBridge Scheduler, o TTL do DynamoDB, os estados `Wait` do Step Functions e a expiração de URLs correm em tempo real. Prazos e agendas de negócio passam sempre pela tabela `scheduled_jobs` (seção 8).
 
 ### 9.3 Kafka
 
-Tópicos internos, todos com schema registrado em `contracts/`:
+O broker é o MSK do Floci da empresa. Tópicos internos, todos com schema registrado em `contracts/`:
 
 | Tópico | Produtor | Consumidores |
 | --- | --- | --- |
@@ -436,7 +460,7 @@ Toda publicação usa outbox transacional. Consumidores são idempotentes. Opcio
 Todos os serviços são instrumentados com OpenTelemetry e declaram o atributo de recurso `org` (`empresa`, `gateway`, `banco`, `emissor` ou `sim`). Há dois pipelines ([ADR 0008](docs/adr/0008-observabilidade-empresa-e-modo-deus.md)):
 
 - o **collector da empresa**, na rede `internal`, recebe a telemetria da loja, das integrações e do conciliador, e encaminha uma cópia para o modo deus;
-- o **collector do modo deus**, na rede `sim-control`, recebe a telemetria dos terceiros e do plano de controle.
+- o **collector do modo deus**, no plano de controle, recebe a telemetria dos terceiros e do próprio plano de controle. Ele se conecta à rede privada de cada organização ([ADR 0011](docs/adr/0011-topologia-de-rede.md)).
 
 O painel "modo deus" mostra o sistema inteiro, incluindo os eventos `chaos.injected`. A área da empresa no Grafana só enxerga `org=empresa`.
 
@@ -455,10 +479,10 @@ reconciliation-lab/
 ├── services/
 │   ├── company/
 │   │   ├── store/              # Laravel
-│   │   ├── integrations/       # Node + Fastify + Drizzle + BullMQ
+│   │   ├── integrations/       # Node + Fastify + Drizzle + BullMQ, Lambda de webhooks e state machine de ingestão
 │   │   └── reconciler/         # Node + Fastify + Drizzle + BullMQ
 │   └── third-parties/
-│       ├── gateway/            # Node + Fastify + Drizzle + BullMQ
+│       ├── gateway/            # Node + Fastify + Drizzle + EventBridge + SQS
 │       │   └── docs/           # especificação interna do gateway
 │       ├── bank/               # Go
 │       └── invoicing/          # Python + FastAPI
@@ -467,11 +491,12 @@ reconciliation-lab/
 │   └── orchestrator/           # executor de cenários e caos
 ├── libs/
 │   ├── sim-clock/              # relógio, notificação de avanço e marca d'água (ts, php, py, go)
-│   └── chaos/                  # config de caos no SSM e decisões determinísticas (ts, php, py, go)
+│   └── chaos/                  # config de caos no AppConfig e decisões determinísticas (ts, php, py, go)
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── networks.md             # documentação das redes e da fronteira
-│   ├── bootstrap/              # buckets, filas, segredos e parâmetros, um diretório por Floci
+│   ├── bootstrap/              # recursos AWS de cada organização, um diretório por Floci
+│   ├── edge/                   # proxies de borda (nginx), um por organização
 │   ├── otel/                   # collectors da empresa e do modo deus
 │   └── grafana/                # dashboards da empresa e do modo deus
 ├── scenarios/                  # cenários de caos e resultados esperados
@@ -491,7 +516,7 @@ Cada fase só começa quando a anterior concilia de ponta a ponta.
 
 | Fase | Entrega | Critério de conclusão |
 | --- | --- | --- |
-| 0. Infra | docker-compose com Floci, Postgres, Redis, Kafka, SFTP e observabilidade; redes separadas | Todos os containers sobem; um trace de teste aparece no Grafana |
+| 0. Infra | docker-compose com os Floci, proxies de borda, plano de controle, SFTP e observabilidade; redes separadas; bootstrap dos recursos AWS. Começa com um spike das verificações da [ADR 0012](docs/adr/0012-servicos-aws-por-organizacao.md) | Todos os containers e recursos sobem; o spike está concluído; um trace de teste aparece no Grafana |
 | 1. Fatia vertical | Loja (pedido avulso), gateway (caminho feliz), integrações (webhook), conciliador (pedido ↔ cobrança) | 100% de match em um dia simulado sem caos |
 | 2. Dinheiro | Relatório de liquidação, banco em Go com SFTP, match cobrança ↔ liquidação ↔ extrato | Lotes N:1 conciliados após avançar 30 dias |
 | 3. Fiscal | Emissor em Python, polling e webhook, match cobrança ↔ nota | Toda cobrança capturada com nota correspondente |
@@ -499,6 +524,7 @@ Cada fase só começa quando a anterior concilia de ponta a ponta.
 | 5. Estornos | Reembolsos, chargebacks, cancelamento de notas | Estornos refletidos nos três terceiros |
 | 6. Caos | Catálogo de falhas e cenários declarativos | Todos os cenários em `scenarios/` passam |
 | 7. Produto | Dashboard de divergências, aging e reprocessamento | Reprocessar um período gera resultado idêntico |
+| 8. Deploy | Imagens no ECR de cada organização e papéis rodando como serviços ECS, começando pelos de background | Um cenário completo passa com os papéis de background no ECS |
 
 ---
 

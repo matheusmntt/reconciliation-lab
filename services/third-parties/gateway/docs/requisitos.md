@@ -44,7 +44,7 @@ Estas rotas não exigem autenticação.
 | GET | `/openapi.json` | Especificação OpenAPI gerada dos schemas Zod | 1 |
 | GET | `/docs` | Documentação navegável da API | 1 |
 | GET | `/health/live` | O processo está de pé | 1 |
-| GET | `/health/ready` | Postgres, Redis e Floci estão acessíveis | 1 |
+| GET | `/health/ready` | RDS, ElastiCache e os serviços AWS usados pelo papel estão acessíveis | 1 |
 
 ### 1.3 Webhooks emitidos
 
@@ -104,14 +104,14 @@ O vocabulário é propositalmente diferente do da empresa (por exemplo, `charge.
 | --- | --- | --- |
 | RF-14 | Gerar a agenda de liquidação: uma linha por parcela de cartão, por Pix e por boleto, com valor bruto, taxa e líquido. | 2 |
 | RF-15 | Fechar um repasse diário por conta e transferir o líquido para a conta bancária do lojista pela API interbancária do banco ([ADR 0010](../../../../docs/adr/0010-repasse-pela-api-do-banco.md)). | 2 |
-| RF-16 | Gerar o relatório de liquidação em CSV de forma assíncrona, guardá-lo no S3 do Floci do gateway e disponibilizá-lo por URL pré-assinada ([ADR 0005](../../../../docs/adr/0005-floci-por-organizacao.md)). | 2 |
+| RF-16 | Gerar o relatório de liquidação em CSV de forma assíncrona, guardá-lo no S3 do Floci do gateway e disponibilizá-lo por URL pré-assinada, servida pelo proxy de borda como `gateway-s3` ([ADR 0005](../../../../docs/adr/0005-floci-por-organizacao.md) e [ADR 0011](../../../../docs/adr/0011-topologia-de-rede.md)). | 2 |
 
 ### Simulação e caos
 
 | ID | Requisito | Fase |
 | --- | --- | --- |
 | RF-17 | Injetar cada falha do catálogo (seção 7.1 do `project.md`) num ponto explícito do código, controlada por probabilidade e seed ([ADR 0006](../../../../docs/adr/0006-configuracao-e-decisoes-de-caos.md)): webhook perdido, duplicado ou fora de ordem; cobrança duplicada; timeout após sucesso; taxa diferente da contratada; relatório atrasado, incompleto ou republicado; linha de liquidação no lote errado; chargeback tardio; respostas 429 e 5xx. | 6 |
-| RF-18 | Simular o pagador com um worker interno: pagar Pix e boletos (fase 2) e abrir chargebacks (fase 5). Os parâmetros vêm de `/sim/gateway/behavior/` no SSM, as decisões são determinísticas e as ações são agendadas na tabela de agendamentos ([ADR 0007](../../../../docs/adr/0007-agendamento-em-tempo-simulado.md)). | 2 e 5 |
+| RF-18 | Simular o pagador com um worker interno: pagar Pix e boletos (fase 2) e abrir chargebacks (fase 5). Os parâmetros vêm da seção `behavior` da configuração do gateway no AppConfig ([ADR 0013](../../../../docs/adr/0013-appconfig-para-configuracao-de-caos.md)), as decisões são determinísticas e as ações são agendadas na tabela de agendamentos ([ADR 0007](../../../../docs/adr/0007-agendamento-em-tempo-simulado.md)). | 2 e 5 |
 | RF-19 | Emitir um evento de telemetria `chaos.injected` para cada falha injetada, com tipo, alvo, instante simulado e versão dos parâmetros. | 6 |
 
 ### Documentação
@@ -174,7 +174,7 @@ Os valores numéricos são exemplos configuráveis por conta.
 - **RN-17:** Estornos, chargebacks e tarifas entram como linhas negativas no próximo repasse. Se o líquido for zero ou negativo, não há repasse, e o saldo negativo passa para o dia seguinte.
 - **RN-18:** O relatório tem uma linha por evento financeiro: parcela, estorno, chargeback, reversão de chargeback, tarifa ou ajuste. Cada linha traz `line_id` estável, `charge_id`, `batch_id`, bruto, taxa, líquido e as datas do evento. **Não** traz `order_id` nem `metadata` (seção 6.2 do `project.md`).
 - **RN-19:** Quando o relatório é republicado com correções, as linhas corrigidas mantêm o `line_id`, e o relatório ganha uma nova versão.
-- **RN-20:** A URL pré-assinada do CSV expira em 1 hora de **tempo real**, porque o Floci valida a expiração com o relógio do sistema. Um novo `GET /v1/reports/{id}` gera outra URL.
+- **RN-20:** A URL pré-assinada do CSV é gerada com o host `gateway-s3` e expira em 1 hora de **tempo real**, porque o Floci valida a expiração com o relógio do sistema. Um novo `GET /v1/reports/{id}` gera outra URL.
 - **RN-30:** A transferência de um repasse é idempotente, com o id do repasse como chave. O repasse vai de `pending` para `paid` ou `failed`. Se falhar, o valor volta ao saldo e entra no repasse seguinte.
 
 ### Estornos e chargebacks
@@ -210,14 +210,22 @@ Os valores numéricos são exemplos configuráveis por conta.
   - um `Request-Id` em toda resposta;
   - códigos 400, 401, 404, 409, 422, 429 e 5xx com significado fixo;
   - dentro da v1, só mudanças aditivas.
-- **RNF-03, isolamento:** Postgres, Redis e Floci próprios, na rede `third-party-gateway`. A API fica exposta só na rede `internet`. O Floci também entra na rede `internet`, apenas para os downloads, e na rede `sim-control`, para o orquestrador gravar a configuração.
+- **RNF-03, isolamento** ([ADR 0011](../../../../docs/adr/0011-topologia-de-rede.md)):
+  - o Floci do gateway e tudo o que ele cria (RDS, ElastiCache) ficam apenas na rede `third-party-gateway`;
+  - a API e os downloads dos relatórios chegam à rede `internet` só pelo proxy de borda, como `gateway-api` e `gateway-s3`;
+  - só o papel `worker` entra na rede `internet`, para chamar os webhooks da empresa e a API interbancária do banco;
+  - o relógio, o orquestrador e o collector do modo deus alcançam o gateway pela rede `third-party-gateway`.
 - **RNF-04, relógio simulado:** todo horário de negócio vem do `sim-clock`. O código de domínio nunca usa `Date.now()` nem `Temporal.Now`.
 - **RNF-05, dois domínios de tempo:**
   - tempo simulado para prazos, expirações, agenda de liquidação, cortes, retentativas de webhook e comportamento do pagador;
   - tempo real para timeouts HTTP, rate limit, retentativas técnicas e expiração de URLs pré-assinadas.
 - **RNF-06, agendamento em tempo simulado:** as tarefas futuras ficam na tabela `scheduled_jobs`, e o "agora" de cada job é o seu `run_at`. Os jobs rodam em ordem, com barreira por instante, e o serviço publica sua marca d'água ([ADR 0007](../../../../docs/adr/0007-agendamento-em-tempo-simulado.md)).
 - **RNF-07, determinismo:** decisões aleatórias, de caos ou do pagador, vêm de `decide(seed, chave, decisão)` e nunca de `Math.random()`.
-- **RNF-08, configuração de caos:** os parâmetros são lidos de `/sim/gateway/` no SSM do Floci do gateway, mantidos em memória e recarregados quando a versão muda. Cada decisão registra a versão que usou.
+- **RNF-08, configuração de caos:** a configuração é um documento JSON no AppConfig do Floci do gateway, com `seed`, `chaos` e `behavior` ([ADR 0013](../../../../docs/adr/0013-appconfig-para-configuracao-de-caos.md)). O gateway:
+  - consulta o documento periodicamente e o valida com Zod;
+  - aplica cada versão nova de forma atômica;
+  - publica a versão aplicada em `sim:config-version:gateway`;
+  - registra em cada decisão a versão que usou.
 - **RNF-09, consistência:** toda mudança de estado financeiro acontece numa transação do Postgres. Os eventos são gravados na mesma transação, num outbox interno, então nenhum evento se perde por falha do processo. As únicas perdas são as injetadas pelo caos.
 - **RNF-10, concorrência:** operações sobre a mesma cobrança são serializadas com lock de linha, o que cobre estornos simultâneos e captura e cancelamento ao mesmo tempo.
 - **RNF-11, desempenho e resiliência:**
@@ -236,18 +244,22 @@ Os valores numéricos são exemplos configuráveis por conta.
   - métricas de negócio próprias: cobranças por status, taxa de sucesso dos webhooks, valor repassado ([ADR 0008](../../../../docs/adr/0008-observabilidade-empresa-e-modo-deus.md)).
 - **RNF-14, testabilidade:**
   - testes de propriedade para parcelas, taxas e agenda, garantindo que as somas sempre fecham;
-  - testes de integração com Postgres, Redis e Floci reais;
+  - testes de integração com Postgres 18 real e com um Floci efêmero para os adaptadores AWS;
   - testes de contrato das respostas contra o OpenAPI exportado.
 
 ## 5. Decisões internas
 
-- **DI-01, simulação do pagador por worker interno:** o comportamento de quem paga (Pix, boleto) e de quem contesta (chargeback) é simulado dentro do gateway, porque faz parte do mundo que ele enxerga. O worker não expõe nenhuma rota. Ele é configurado por `/sim/gateway/behavior/` e agendado pela tabela `scheduled_jobs`.
+- **DI-01, simulação do pagador por worker interno:** o comportamento de quem paga (Pix, boleto) e de quem contesta (chargeback) é simulado dentro do gateway, porque faz parte do mundo que ele enxerga. O worker não expõe nenhuma rota. Ele é configurado pela seção `behavior` da configuração no AppConfig, recebe os eventos pela fila SQS `simulation` e agenda suas ações na tabela `scheduled_jobs`.
 - **DI-02, vocabulário próprio:** estados e eventos usam a linguagem do gateway (`paid`, `charge.paid`), diferente da empresa, para que a camada anticorrupção tenha uma tradução de verdade a fazer.
 
 ## 6. Verificações pendentes
 
-- **URLs pré-assinadas com IAM ligado (fase 2):** confirmar que funcionam com a imposição de IAM ligada no Floci ([floci-io/floci#4367](https://github.com/floci-io/floci/issues/4367)).
+- **URLs pré-assinadas com IAM ligado:** confirmar que funcionam com a imposição de IAM ligada no Floci ([floci-io/floci#4367](https://github.com/floci-io/floci/issues/4367)) e passando pelo proxy de borda com o host `gateway-s3`.
+- **Read replica do RDS:** confirmar se ela continua acompanhando o primário. Enquanto isso não for confirmado, a URL da réplica aponta para o primário.
+- **EventBridge para SQS:** confirmar o roteamento por `detail-type` e o envio para a DLQ depois de esgotadas as tentativas.
 - **Temporal na imagem Docker:** confirmar que a imagem usada pelo gateway foi compilada com Temporal (`node -p "typeof Temporal"` deve imprimir `object`).
+
+Essas verificações fazem parte do spike da fase 0 ([ADR 0012](../../../../docs/adr/0012-servicos-aws-por-organizacao.md)).
 
 ## 7. Fora de escopo
 

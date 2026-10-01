@@ -1,7 +1,8 @@
 # ADR 0006: Configuração e decisões de caos
 
-- **Status:** Aceita
+- **Status:** Aceita, substituída parcialmente
 - **Data:** 2026-10-01
+- **Substituída parcialmente por:** [ADR 0013](0013-appconfig-para-configuracao-de-caos.md), que move a configuração do SSM para o AppConfig. As decisões determinísticas, o evento `chaos.injected` e a `libs/chaos` continuam valendo.
 
 ## Contexto
 

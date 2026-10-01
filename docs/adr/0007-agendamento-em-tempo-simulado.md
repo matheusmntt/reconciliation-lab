@@ -2,6 +2,7 @@
 
 - **Status:** Aceita
 - **Data:** 2026-10-01
+- **Complementada por:** [ADR 0012](0012-servicos-aws-por-organizacao.md). Onde esta ADR fala em BullMQ, leia "o executor de filas do serviço": BullMQ na empresa, SQS no gateway, RabbitMQ no emissor de notas e o próprio Postgres no banco.
 
 ## Contexto
 
