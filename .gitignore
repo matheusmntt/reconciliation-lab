@@ -1,0 +1,13 @@
+# sistema operacional
+.DS_Store
+
+# segredos
+.env
+.env.*
+!.env.example
+
+# node
+node_modules/
+dist/
+coverage/
+npm-debug.log*
