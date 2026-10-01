@@ -10,7 +10,7 @@ build:
 	pnpm build
 
 test:
-	@echo "gateway: sem testes ainda"
+	pnpm test
 
 lint:
 	pnpm lint

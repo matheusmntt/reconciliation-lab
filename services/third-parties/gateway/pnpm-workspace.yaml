@@ -4,3 +4,11 @@
 # Dependências autorizadas a rodar scripts de instalação.
 allowBuilds:
   esbuild: true
+
+# O dependency-cruiser lê TypeScript pela API JavaScript do compilador, que o
+# TypeScript 7 (nativo) não tem. Ele recebe o próprio TypeScript 6; o resto do
+# serviço continua no 7.
+packageExtensions:
+  dependency-cruiser:
+    dependencies:
+      typescript: ~6.0.3

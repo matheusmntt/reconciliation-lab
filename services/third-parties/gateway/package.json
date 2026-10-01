@@ -12,7 +12,10 @@
     "build": "tsup src/server.ts --format esm --target node26 --clean",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check . && pnpm lint:deps",
+    "lint:deps": "depcruise src --config .dependency-cruiser.cjs --output-type err-long",
     "lint:fix": "biome check --write .",
     "format": "biome format --write ."
   },
@@ -23,9 +26,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
+    "@fast-check/vitest": "^0.5.0",
     "@types/node": "^26.6.3",
+    "dependency-cruiser": "^18.5.0",
+    "fast-check": "^4.10.2",
     "tsup": "^8.5.1",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
   }
 }
