@@ -1,0 +1,6 @@
+# Configurações do pnpm deste serviço. Não declara pacotes, então não é um
+# workspace entre serviços (ver ADR 0004).
+
+# Dependências autorizadas a rodar scripts de instalação.
+allowBuilds:
+  esbuild: true
